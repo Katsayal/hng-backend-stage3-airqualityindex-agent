@@ -106,39 +106,45 @@ async def a2a_aqi_endpoint(request: Request):
     """
     A2A-compliant endpoint for Air Quality Index Agent.
     Accepts JSON-RPC 2.0 payloads and returns TaskResult responses.
-    Only processes the latest meaningful text from messages.
+    Only processes the latest meaningful user text from messages.
+    Fully guarded with logging for debugging.
     """
-
     def extract_latest_text(message) -> str:
         """
         Extracts the last meaningful user text from a message.
-        Ignores HTML, JSON, empty strings, and nested data duplicates.
+        Ignores HTML, JSON, empty strings, and safely handles nested 'data' arrays.
         """
         if not message or not getattr(message, "parts", None):
             return ""
 
         all_texts = []
-        for part in message.parts:
-            kind = getattr(part, "kind", None)
 
-            if kind == "text":
-                text = getattr(part, "text", "").strip()
-                if text and not text.startswith("<") and not text.startswith("{"):
-                    all_texts.append(text)
+        def collect_texts(parts):
+            for part in parts:
+                kind = getattr(part, "kind", None)
 
-            elif kind == "data" and isinstance(getattr(part, "data", None), list):
-                for d in part.data:
-                    t = d.get("text", "").strip()
-                    if t and not t.startswith("<") and not t.startswith("{"):
-                        all_texts.append(t)
+                if kind == "text":
+                    text = getattr(part, "text", "").strip()
+                    if text and not text.startswith("<") and not text.startswith("{"):
+                        all_texts.append(text)
 
-        return all_texts[-1] if all_texts else ""
+                elif kind == "data" and isinstance(getattr(part, "data", None), list):
+                    for d in part.data:
+                        # Guard against unexpected dict structure
+                        if isinstance(d, dict):
+                            t = d.get("text", "").strip()
+                            if t and not t.startswith("<") and not t.startswith("{"):
+                                all_texts.append(t)
+
+        collect_texts(message.parts)
+
+        return all_texts[-1] if all_texts else "No valid message found."
 
     try:
         body = await request.json()
-        print("Received body:", body)
+        logger.info(f"Received A2A body: {body}")
 
-        # Validate JSON-RPC base structure
+        # Validate basic JSON-RPC structure
         if body.get("jsonrpc") != "2.0" or "id" not in body:
             return JSONResponse(
                 status_code=400,
@@ -152,9 +158,11 @@ async def a2a_aqi_endpoint(request: Request):
                 }
             )
 
+        # Parse into Pydantic model
         rpc_request = JSONRPCRequest(**body)
+        logger.info(f"RPC request parsed. Method: {rpc_request.method}, ID: {rpc_request.id}")
 
-        # Extract the latest message depending on method
+        # Extract message depending on method
         message = None
         if rpc_request.method == "message/send":
             message = getattr(rpc_request.params, "message", None)
@@ -175,26 +183,34 @@ async def a2a_aqi_endpoint(request: Request):
                 content={
                     "jsonrpc": "2.0",
                     "id": rpc_request.id,
-                    "error": {
-                        "code": -32601,
-                        "message": f"Unsupported method: {rpc_request.method}"
-                    }
+                    "error": {"code": -32601, "message": f"Unsupported method: {rpc_request.method}"}
                 }
             )
 
-        # Safely extract only the latest text
+        logger.info(f"Message extracted. Parts: {len(getattr(message, 'parts', [])) if message else 0}")
+
+        # Safely extract the latest text
         text = extract_latest_text(message)
-        if not text:
-            text = "No valid message found."
+        logger.info(f"Latest text extracted: '{text}'")
 
-        # Build a Telex-style event so we can reuse existing logic
+        # Build Telex-style event
+        from models import TelexEvent, TelexEventData
         telex_event = TelexEvent(type="message", data=TelexEventData(text=text))
-        response = await handle_telex_event(telex_event)
 
-        # Build A2A-compliant message
+        # Safely call handle_telex_event
+        try:
+            response = await handle_telex_event(telex_event)
+            summary_text = getattr(response.data, "summary", "No summary returned")
+        except Exception as e:
+            logger.exception("handle_telex_event failed")
+            summary_text = f"Error handling event: {str(e)}"
+
+        logger.info(f"Response summary: '{summary_text}'")
+
+        # Build A2A-compliant response
         agent_message = A2AMessage(
             role="agent",
-            parts=[MessagePart(kind="text", text=response.data.summary)]
+            parts=[MessagePart(kind="text", text=summary_text)]
         )
 
         task_result = TaskResult(
@@ -209,6 +225,7 @@ async def a2a_aqi_endpoint(request: Request):
         return rpc_response.model_dump()
 
     except Exception as e:
+        logger.exception("A2A endpoint failed")
         return JSONResponse(
             status_code=500,
             content={
