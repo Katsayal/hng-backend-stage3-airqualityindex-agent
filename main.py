@@ -4,7 +4,7 @@ import logging
 from dotenv import load_dotenv
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import JSONResponse
-from models import TelexEvent
+from models import TelexEvent, TelexEventData
 from services.telex_integration import handle_telex_event
 from utils.errors import handle_exception
 from modelss.a2a import (
@@ -119,6 +119,25 @@ async def a2a_aqi_endpoint(request: Request):
     A2A-compliant endpoint for Air Quality Index Agent.
     Accepts JSON-RPC 2.0 payloads and returns TaskResult responses.
     """
+
+    def extract_message_text(message) -> str:
+        """
+        Safely extract all text from a message object,
+        handling parts with kind="text" and kind="data".
+        """
+        if not message or not getattr(message, "parts", None):
+            return ""
+
+        texts = []
+        for part in message.parts:
+            if getattr(part, "kind", None) == "text" and getattr(part, "text", None):
+                texts.append(part.text)
+            elif getattr(part, "kind", None) == "data" and isinstance(getattr(part, "data", None), list):
+                for d in part.data:
+                    if isinstance(d, dict) and d.get("text"):
+                        texts.append(d["text"])
+        return " ".join(texts).strip()
+
     try:
         body = await request.json()
         print("Received body:", body)
@@ -139,35 +158,21 @@ async def a2a_aqi_endpoint(request: Request):
 
         rpc_request = JSONRPCRequest(**body)
 
-        # Extract the message text
+        # Extract the message object depending on method
+        message = None
         if rpc_request.method == "message/send":
-            # Safely get 'message' (params may be a model without that attribute); fall back to 'messages' list
             message = getattr(rpc_request.params, "message", None)
             if message is None:
                 messages = getattr(rpc_request.params, "messages", None)
                 if isinstance(messages, list) and messages:
                     message = messages[-1]
-            # Extract text from parts safely
-            parts = getattr(message, "parts", []) or []
-            text = next(
-                (p.text for p in parts if getattr(p, "kind", None) == "text" and getattr(p, "text", None)), ""
-            )
         elif rpc_request.method == "execute":
-            # params may provide a single 'message' or a list 'messages'; normalize both forms
             params = rpc_request.params
             messages = getattr(params, "messages", None) or getattr(params, "message", None)
-            # If we got a list, choose the last message; otherwise assume it's a single message object
             if isinstance(messages, list):
                 message = messages[-1]
             else:
                 message = messages
-            # message could be None if missing; guard for that
-            if message is None:
-                text = ""
-            else:
-                text = next(
-                    (p.text for p in message.parts if p.kind == "text" and p.text), ""
-                )
         else:
             return JSONResponse(
                 status_code=400,
@@ -181,26 +186,18 @@ async def a2a_aqi_endpoint(request: Request):
                 }
             )
 
-        # Build a Telex-style event so we can reuse existing logic
-        telex_event = {
-            "type": "message",
-            "data": {"text": text}
-        }
+        # Safely extract text from the message
+        text = extract_message_text(message)
 
-        # Use existing handler for AQI logic
+        # Build a Telex-style event so we can reuse existing logic
         from models import TelexEvent
-        event = TelexEvent(**telex_event)
-        response = await handle_telex_event(event)
+        telex_event = TelexEvent(type="message", data=TelexEventData(text=text))
+        response = await handle_telex_event(telex_event)
 
         # Build A2A-compliant message
         agent_message = A2AMessage(
             role="agent",
-            parts=[
-                MessagePart(
-                    kind="text",
-                    text=response.data.summary
-                )
-            ]
+            parts=[MessagePart(kind="text", text=response.data.summary)]
         )
 
         task_result = TaskResult(
