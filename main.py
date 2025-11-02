@@ -128,26 +128,23 @@ async def a2a_aqi_endpoint(request: Request):
         if not message or not getattr(message, "parts", None):
             return ""
 
-        texts = []
-        for part in message.parts:
-            if getattr(part, "kind", None) == "text" and getattr(part, "text", None):
-                text_content = part.text.strip()
-                if text_content.startswith('{') or text_content.startswith('<p'):
-                    continue
 
-                if len(texts) == 0:
-                    texts.append(text_content)
-                    return text_content
-                
-            elif getattr(part, "kind", None) == "data" and isinstance(getattr(part, "data", None), list):
-                for d in part.data[:5]:
-                    if isinstance(d, dict) and d.get("text"):
-                        text_content = d["text"].strip()
-                        if len(texts) == 0:
-                            texts.append(text_content)
-                            return text_content
+        for part in message.parts:
+            kind = getattr(part, "kind", None)
+            text = getattr(part, "text", "").strip() if getattr(part, "text", None) else ""
+
+            if not text or text.startswith("<") or text.startswith("{"):
+                continue
+            return text
+        
+        for part in message.parts:
+            if getattr(part, "kind", None) == "data" and isinstance(getattr(part, "data", None), list):
+                for d in part.data:
+                    t = d.get("text", "").strip()
+                    if t and not t.startswith("<") and not t.startswith("{"):
+                        return t
                         
-        return " ".join(texts).strip()
+        return ""
 
     try:
         body = await request.json()
