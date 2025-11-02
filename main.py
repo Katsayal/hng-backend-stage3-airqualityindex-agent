@@ -118,26 +118,38 @@ async def a2a_aqi_endpoint(request: Request):
     """
     A2A-compliant endpoint for Air Quality Index Agent.
     Accepts JSON-RPC 2.0 payloads and returns TaskResult responses.
-    Only the latest message is processed; previous messages are ignored.
+    Processes ONLY the latest meaningful user text, ignoring all previous messages.
     """
 
-    def extract_latest_message_text(message) -> str:
+    def extract_latest_text(message) -> str:
         """
-        Extract only the last 'text' message from the incoming message.
-        Ignores HTML, JSON, or empty strings.
+        Recursively extract the last meaningful text from a message.
+        Ignores HTML, JSON, or empty strings. Works for nested 'data' parts.
         """
         if not message or not getattr(message, "parts", None):
             return ""
 
-        # Traverse parts in reverse to get the latest meaningful text
-        for part in reversed(message.parts):
-            if getattr(part, "kind", None) == "text":
+        # Flatten all text from parts, including nested data arrays
+        all_texts = []
+
+        for part in message.parts:
+            kind = getattr(part, "kind", None)
+
+            # Direct text
+            if kind == "text":
                 text = getattr(part, "text", "").strip()
                 if text and not text.startswith("<") and not text.startswith("{"):
-                    return text
+                    all_texts.append(text)
 
-        # Fallback to empty string if nothing valid found
-        return ""
+            # Nested data array
+            elif kind == "data" and isinstance(getattr(part, "data", None), list):
+                for d in part.data:
+                    t = d.get("text", "").strip()
+                    if t and not t.startswith("<") and not t.startswith("{"):
+                        all_texts.append(t)
+
+        # Return the last valid text
+        return all_texts[-1] if all_texts else ""
 
     try:
         body = await request.json()
@@ -187,8 +199,8 @@ async def a2a_aqi_endpoint(request: Request):
                 }
             )
 
-        # Extract only the latest valid text
-        text = extract_latest_message_text(message)
+        # Extract the latest meaningful text
+        text = extract_latest_text(message)
 
         # Build a Telex-style event for reuse
         from models import TelexEvent, TelexEventData
