@@ -131,22 +131,11 @@ async def a2a_aqi_endpoint(request: Request):
         texts = []
         for part in message.parts:
             if getattr(part, "kind", None) == "text" and getattr(part, "text", None):
-                text_content = part.text.strip()
-                if text_content.startswith('{') or text_content.startswith('<p'):
-                    continue
-
-                if len(texts) == 0:
-                    texts.append(text_content)
-                    return text_content
-                
+                texts.append(part.text)
             elif getattr(part, "kind", None) == "data" and isinstance(getattr(part, "data", None), list):
-                for d in part.data[:5]:
+                for d in part.data:
                     if isinstance(d, dict) and d.get("text"):
-                        text_content = d["text"].strip()
-                        if len(texts) == 0:
-                            texts.append(text_content)
-                            return text_content
-                        
+                        texts.append(d["text"])
         return " ".join(texts).strip()
 
     try:
