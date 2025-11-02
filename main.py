@@ -118,39 +118,32 @@ async def a2a_aqi_endpoint(request: Request):
     """
     A2A-compliant endpoint for Air Quality Index Agent.
     Accepts JSON-RPC 2.0 payloads and returns TaskResult responses.
+    Only the latest message is processed; previous messages are ignored.
     """
 
-    def extract_message_text(message) -> str:
+    def extract_latest_message_text(message) -> str:
         """
-        Safely extract all text from a message object,
-        handling parts with kind="text" and kind="data".
+        Extract only the last 'text' message from the incoming message.
+        Ignores HTML, JSON, or empty strings.
         """
         if not message or not getattr(message, "parts", None):
             return ""
 
+        # Traverse parts in reverse to get the latest meaningful text
+        for part in reversed(message.parts):
+            if getattr(part, "kind", None) == "text":
+                text = getattr(part, "text", "").strip()
+                if text and not text.startswith("<") and not text.startswith("{"):
+                    return text
 
-        for part in message.parts:
-            kind = getattr(part, "kind", None)
-            text = getattr(part, "text", "").strip() if getattr(part, "text", None) else ""
-
-            if not text or text.startswith("<") or text.startswith("{"):
-                continue
-            return text
-        
-        for part in message.parts:
-            if getattr(part, "kind", None) == "data" and isinstance(getattr(part, "data", None), list):
-                for d in part.data:
-                    t = d.get("text", "").strip()
-                    if t and not t.startswith("<") and not t.startswith("{"):
-                        return t
-                        
+        # Fallback to empty string if nothing valid found
         return ""
 
     try:
         body = await request.json()
         print("Received body:", body)
 
-        # Validate JSON-RPC base structure
+        # Validate JSON-RPC structure
         if body.get("jsonrpc") != "2.0" or "id" not in body:
             return JSONResponse(
                 status_code=400,
@@ -166,7 +159,7 @@ async def a2a_aqi_endpoint(request: Request):
 
         rpc_request = JSONRPCRequest(**body)
 
-        # Extract the message object depending on method
+        # Extract the latest message depending on method
         message = None
         if rpc_request.method == "message/send":
             message = getattr(rpc_request.params, "message", None)
@@ -194,15 +187,15 @@ async def a2a_aqi_endpoint(request: Request):
                 }
             )
 
-        # Safely extract text from the message
-        text = extract_message_text(message)
+        # Extract only the latest valid text
+        text = extract_latest_message_text(message)
 
-        # Build a Telex-style event so we can reuse existing logic
-        from models import TelexEvent
+        # Build a Telex-style event for reuse
+        from models import TelexEvent, TelexEventData
         telex_event = TelexEvent(type="message", data=TelexEventData(text=text))
         response = await handle_telex_event(telex_event)
 
-        # Build A2A-compliant message
+        # Build A2A-compliant agent message
         agent_message = A2AMessage(
             role="agent",
             parts=[MessagePart(kind="text", text=response.data.summary)]
