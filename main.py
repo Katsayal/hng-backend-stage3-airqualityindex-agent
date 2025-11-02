@@ -118,44 +118,44 @@ async def a2a_aqi_endpoint(request: Request):
     """
     A2A-compliant endpoint for Air Quality Index Agent.
     Accepts JSON-RPC 2.0 payloads and returns TaskResult responses.
-    Processes ONLY the latest meaningful user text, ignoring all previous messages.
+    Only processes the latest meaningful text from messages.
     """
 
     def extract_latest_text(message) -> str:
         """
-        Recursively extract the last meaningful text from a message.
-        Ignores HTML, JSON, or empty strings. Works for nested 'data' parts.
+        Extracts the last meaningful user text from a message.
+        Ignores HTML, JSON, and empty strings.
+        Handles nested 'data' arrays.
         """
         if not message or not getattr(message, "parts", None):
             return ""
 
-        # Flatten all text from parts, including nested data arrays
         all_texts = []
 
-        for part in message.parts:
-            kind = getattr(part, "kind", None)
+        def collect_texts(parts):
+            for part in parts:
+                kind = getattr(part, "kind", None)
 
-            # Direct text
-            if kind == "text":
-                text = getattr(part, "text", "").strip()
-                if text and not text.startswith("<") and not text.startswith("{"):
-                    all_texts.append(text)
+                if kind == "text":
+                    text = getattr(part, "text", "").strip()
+                    if text and not text.startswith("<") and not text.startswith("{"):
+                        all_texts.append(text)
 
-            # Nested data array
-            elif kind == "data" and isinstance(getattr(part, "data", None), list):
-                for d in part.data:
-                    t = d.get("text", "").strip()
-                    if t and not t.startswith("<") and not t.startswith("{"):
-                        all_texts.append(t)
+                elif kind == "data" and isinstance(getattr(part, "data", None), list):
+                    for d in part.data:
+                        t = d.get("text", "").strip()
+                        if t and not t.startswith("<") and not t.startswith("{"):
+                            all_texts.append(t)
 
-        # Return the last valid text
-        return all_texts[-1] if all_texts else ""
+        collect_texts(message.parts)
+
+        return all_texts[-1] if all_texts else "No valid message found."
 
     try:
         body = await request.json()
         print("Received body:", body)
 
-        # Validate JSON-RPC structure
+        # Validate JSON-RPC base structure
         if body.get("jsonrpc") != "2.0" or "id" not in body:
             return JSONResponse(
                 status_code=400,
@@ -199,15 +199,15 @@ async def a2a_aqi_endpoint(request: Request):
                 }
             )
 
-        # Extract the latest meaningful text
+        # Safely extract only the latest text
         text = extract_latest_text(message)
 
-        # Build a Telex-style event for reuse
+        # Build a Telex-style event so we can reuse existing logic
         from models import TelexEvent, TelexEventData
         telex_event = TelexEvent(type="message", data=TelexEventData(text=text))
         response = await handle_telex_event(telex_event)
 
-        # Build A2A-compliant agent message
+        # Build A2A-compliant message
         agent_message = A2AMessage(
             role="agent",
             parts=[MessagePart(kind="text", text=response.data.summary)]
