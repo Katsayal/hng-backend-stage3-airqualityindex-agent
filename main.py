@@ -121,6 +121,7 @@ async def a2a_aqi_endpoint(request: Request):
     """
     try:
         body = await request.json()
+        print("Received body:", body)
 
         # Validate JSON-RPC base structure
         if body.get("jsonrpc") != "2.0" or "id" not in body:
