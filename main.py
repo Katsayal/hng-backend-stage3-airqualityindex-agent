@@ -12,7 +12,6 @@ from modelss.a2a import (
     TaskStatus, A2AMessage, MessagePart, Artifact
 )
 
-
 # === Load environment variables ===
 load_dotenv()
 
@@ -50,19 +49,13 @@ async def home():
 async def health_check():
     return {"status": "ok", "message": "AQI Agent is running with WebSocket support"}
 
-
 # === Webhook Endpoint ===
 @app.post("/webhook")
 async def webhook_listener(request: Request):
-    """
-    Handles incoming webhook events (HTTP).
-    Supports optional session_id in query or headers.
-    """
     try:
         body = await request.json()
         event = TelexEvent(**body)
 
-        # Optional: allow clients to send ?session_id=xxx or Header
         session_id = (
             request.query_params.get("session_id")
             or request.headers.get("X-Session-ID")
@@ -80,16 +73,11 @@ async def webhook_listener(request: Request):
         logger.exception("Error processing webhook event")
         return handle_exception(e)
 
-
-# === WebSocket Endpoint (Persistent Conversation) ===
+# === WebSocket Endpoint ===
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    """
-    WebSocket endpoint for real-time, stateful conversations.
-    Each connected client maintains its own session memory.
-    """
     await websocket.accept()
-    session_id = str(uuid.uuid4())  # unique session ID per connection
+    session_id = str(uuid.uuid4())
     logger.info(f"New WebSocket connection: {session_id}")
 
     await websocket.send_json({
@@ -111,8 +99,8 @@ async def websocket_endpoint(websocket: WebSocket):
     except Exception as e:
         logger.exception("Error in WebSocket session")
         await websocket.send_json({"type": "error", "data": {"message": str(e)}})
-        
 
+# === A2A Endpoint ===
 @app.post("/a2a/aqi")
 async def a2a_aqi_endpoint(request: Request):
     """
@@ -124,32 +112,27 @@ async def a2a_aqi_endpoint(request: Request):
     def extract_latest_text(message) -> str:
         """
         Extracts the last meaningful user text from a message.
-        Ignores HTML, JSON, and empty strings.
-        Handles nested 'data' arrays.
+        Ignores HTML, JSON, empty strings, and nested data duplicates.
         """
         if not message or not getattr(message, "parts", None):
             return ""
 
         all_texts = []
+        for part in message.parts:
+            kind = getattr(part, "kind", None)
 
-        def collect_texts(parts):
-            for part in parts:
-                kind = getattr(part, "kind", None)
+            if kind == "text":
+                text = getattr(part, "text", "").strip()
+                if text and not text.startswith("<") and not text.startswith("{"):
+                    all_texts.append(text)
 
-                if kind == "text":
-                    text = getattr(part, "text", "").strip()
-                    if text and not text.startswith("<") and not text.startswith("{"):
-                        all_texts.append(text)
+            elif kind == "data" and isinstance(getattr(part, "data", None), list):
+                for d in part.data:
+                    t = d.get("text", "").strip()
+                    if t and not t.startswith("<") and not t.startswith("{"):
+                        all_texts.append(t)
 
-                elif kind == "data" and isinstance(getattr(part, "data", None), list):
-                    for d in part.data:
-                        t = d.get("text", "").strip()
-                        if t and not t.startswith("<") and not t.startswith("{"):
-                            all_texts.append(t)
-
-        collect_texts(message.parts)
-
-        return all_texts[-1] if all_texts else "No valid message found."
+        return all_texts[-1] if all_texts else ""
 
     try:
         body = await request.json()
@@ -201,9 +184,10 @@ async def a2a_aqi_endpoint(request: Request):
 
         # Safely extract only the latest text
         text = extract_latest_text(message)
+        if not text:
+            text = "No valid message found."
 
         # Build a Telex-style event so we can reuse existing logic
-        from models import TelexEvent, TelexEventData
         telex_event = TelexEvent(type="message", data=TelexEventData(text=text))
         response = await handle_telex_event(telex_event)
 
